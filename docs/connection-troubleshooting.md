@@ -160,10 +160,28 @@ If the script cannot produce a real HTTP status, investigate:
 Startup failures now try to include more detail when DingTalk returns a structured error response, for example:
 
 - HTTP status
+- connection stage
 - DingTalk `code`
 - DingTalk `message`
 - request ID
 - sanitized error payload
+
+### Stage meanings
+
+- `connect.open`: failure happened while requesting `POST /v1.0/gateway/connections/open`
+- `connect.websocket`: `connections/open` already succeeded, but the later WebSocket connection still failed
+
+This split is useful because:
+
+- `connect.open` usually points you back to credentials, app state, Stream mode setup, or DingTalk request validation.
+- `connect.websocket` points much more strongly to WSS reachability, proxy behavior, TLS interception, or corporate gateway policy.
+
+If you see `connect.websocket` together with an endpoint like `wss://wss-open-connection.dingtalk.com/...`, prioritize checking:
+
+- outbound WSS access on port 443
+- proxy `Upgrade` / WebSocket support
+- SSL MITM / security products
+- whether the plugin process is running behind a different proxy path than your manual shell test
 
 If you open an issue, include:
 

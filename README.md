@@ -631,6 +631,8 @@ await dingtalkPlugin.outbound.sendMedia({
 
 完整排障流程见 `docs/connection-troubleshooting.md`。
 
+如果新日志里出现 `connect.open` 或 `connect.websocket`，也可以直接按文档中的阶段说明来判断：前者优先查钉钉应用配置，后者优先查 WSS / 代理 / 企业网关。
+
 ### 错误 payload 日志规范（`[ErrorPayload]`）
 
 为便于快速定位 4xx/5xx 参数问题，插件会在 API 错误分支输出统一格式日志：
