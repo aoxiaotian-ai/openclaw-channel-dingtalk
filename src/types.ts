@@ -245,6 +245,7 @@ export interface SendMessageOptions {
   useMarkdown?: boolean;
   atUserId?: string | null;
   log?: any;
+  conversationId?: string;
   mediaPath?: string;
   filePath?: string;
   mediaUrl?: string;

@@ -293,7 +293,7 @@ export async function sendProactiveMedia(
       await appendProactiveOutboundJournal({
         storePath: options.storePath,
         accountId: options.accountId,
-        conversationId: resolvedTarget,
+        conversationId: options.conversationId || resolvedTarget,
         messageId,
         text: `[media:${mediaType}] ${mediaPath}`,
         messageType: "outbound-proactive-media",
@@ -449,7 +449,7 @@ export async function sendMessage(
         await appendOutboundToQuoteJournal({
           storePath: options.storePath,
           accountId: options.accountId,
-          conversationId,
+          conversationId: options.conversationId || conversationId,
           messageId,
           text,
           messageType: "outbound",
@@ -465,7 +465,7 @@ export async function sendMessage(
       await appendProactiveOutboundJournal({
         storePath: options.storePath,
         accountId: options.accountId,
-        conversationId,
+        conversationId: options.conversationId || conversationId,
         messageId,
         text,
         messageType: "outbound-proactive",

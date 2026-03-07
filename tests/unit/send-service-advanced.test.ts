@@ -199,4 +199,30 @@ describe('send-service advanced branches', () => {
             }),
         );
     });
+
+    it('uses provided DingTalk conversationId for DM journaling scope instead of user target id', async () => {
+        mockedAxios.mockResolvedValueOnce({ data: { processQueryKey: 'proactive_q_dm_1' } } as any);
+
+        await sendMessage(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id' } as any,
+            'user_target_123',
+            'hello proactive dm',
+            {
+                accountId: 'main',
+                storePath: '/tmp/sessions.json',
+                conversationId: 'cid_dm_stable',
+            } as any,
+        );
+
+        expect(quoteJournalMocks.appendProactiveOutboundJournalMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                conversationId: 'cid_dm_stable',
+            }),
+        );
+        expect(quoteJournalMocks.appendProactiveOutboundJournalMock).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+                conversationId: 'user_target_123',
+            }),
+        );
+    });
 });
