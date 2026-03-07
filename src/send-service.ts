@@ -22,6 +22,7 @@ import type {
   AICardInstance,
   AxiosResponse,
   DingTalkConfig,
+  DingTalkTrackingMetadata,
   Logger,
   ProactiveMessagePayload,
   SendMessageOptions,
@@ -30,6 +31,12 @@ import type {
 import { AICardStatus } from "./types";
 
 export { detectMediaTypeFromExtension } from "./media-utils";
+
+type ProactiveTextSendResult = AxiosResponse | { tracking: DingTalkTrackingMetadata };
+
+function isTrackingResult(result: ProactiveTextSendResult): result is { tracking: DingTalkTrackingMetadata } {
+  return "tracking" in result;
+}
 
 function extractOutboundMessageId(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") {
@@ -109,7 +116,7 @@ export async function sendProactiveTextOrMarkdown(
   target: string,
   text: string,
   options: SendMessageOptions = {},
-): Promise<AxiosResponse> {
+): Promise<ProactiveTextSendResult> {
   const log = options.log || getLogger();
 
   // Support group:/user: prefix and restore original case-sensitive conversationId.
@@ -131,7 +138,16 @@ export async function sendProactiveTextOrMarkdown(
     );
     const result = await sendProactiveCardText(config, resolvedTarget, text, log);
     if (result.ok) {
-      return {} as AxiosResponse; // Return empty response for compatibility
+      if (options.accountId) {
+        deleteProactiveRiskObservation(options.accountId, resolvedTarget);
+      }
+      return {
+        tracking: {
+          processQueryKey: result.processQueryKey,
+          outTrackId: result.outTrackId,
+          cardInstanceId: result.cardInstanceId,
+        },
+      };
     }
     log?.warn?.(
       `[DingTalk] Proactive card send failed, fallback to proactive template API: ${result.error || "unknown"}`,
@@ -403,7 +419,7 @@ export async function sendMessage(
   conversationId: string,
   text: string,
   options: SendMessageOptions & { sessionWebhook?: string; card?: AICardInstance; accountId?: string } = {},
-): Promise<{ ok: boolean; error?: string; data?: AxiosResponse; messageId?: string }> {
+): Promise<{ ok: boolean; error?: string; data?: AxiosResponse; messageId?: string; tracking?: DingTalkTrackingMetadata }> {
   try {
     const messageType = config.messageType || "markdown";
     const log = options.log || getLogger();
@@ -421,7 +437,14 @@ export async function sendMessage(
           if (!proactiveResult.ok) {
             return { ok: false, error: proactiveResult.error || "Card send failed" };
           }
-          return { ok: true };
+          return {
+            ok: true,
+            tracking: {
+              processQueryKey: proactiveResult.processQueryKey,
+              outTrackId: proactiveResult.outTrackId,
+              cardInstanceId: proactiveResult.cardInstanceId,
+            },
+          };
         }
       } else {
         try {
@@ -471,6 +494,9 @@ export async function sendMessage(
         messageType: "outbound-proactive",
         log,
       });
+    }
+    if (isTrackingResult(result)) {
+      return { ok: true, tracking: result.tracking, messageId };
     }
     return { ok: true, data: result, messageId };
   } catch (err: any) {

@@ -72,6 +72,33 @@ describe('send-service advanced branches', () => {
         expect(result.ok).toBe(true);
     });
 
+    it('preserves tracking metadata when card mode proactive send succeeds without a live card instance', async () => {
+        cardServiceMocks.sendProactiveCardTextMock.mockResolvedValueOnce({
+            ok: true,
+            outTrackId: 'track_card_real_1',
+            processQueryKey: 'card_process_real_1',
+            cardInstanceId: 'card_instance_real_1',
+        });
+
+        const result = await sendMessage(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id', messageType: 'card', cardTemplateId: 'tmpl' } as any,
+            'manager123',
+            'text',
+            { accountId: 'main' } as any,
+        );
+
+        expect(cardServiceMocks.sendProactiveCardTextMock).toHaveBeenCalledTimes(1);
+        expect(mockedAxios).not.toHaveBeenCalled();
+        expect(result).toEqual({
+            ok: true,
+            tracking: {
+                outTrackId: 'track_card_real_1',
+                processQueryKey: 'card_process_real_1',
+                cardInstanceId: 'card_instance_real_1',
+            },
+        });
+    });
+
     it('returns {ok:false} when proactive send throws', async () => {
         mockedAxios.mockRejectedValueOnce({
             message: 'network failed',
