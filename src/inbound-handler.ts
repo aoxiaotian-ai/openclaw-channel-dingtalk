@@ -376,7 +376,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   if (content.mediaPath && data.msgId) {
     cacheInboundDownloadCode(
       accountId, data.conversationId, data.msgId, content.mediaPath, content.messageType, data.createAt,
-      { spaceId: data.content?.spaceId, fileId: data.content?.fileId },
+      { spaceId: data.content?.spaceId, fileId: data.content?.fileId, storePath },
     );
   }
 
@@ -387,7 +387,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     if (!quotedMsgId) {
       return null;
     }
-    const cached = getCachedDownloadCode(accountId, data.conversationId, quotedMsgId);
+    const cached = getCachedDownloadCode(accountId, data.conversationId, quotedMsgId, storePath);
     if (!cached) {
       return null;
     }
