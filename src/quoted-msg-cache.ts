@@ -1,4 +1,5 @@
 import { readNamespaceJson, writeNamespaceJsonAtomic } from "./persistence-store";
+
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_ENTRIES_PER_CONVERSATION = 100;
 const MAX_CONVERSATIONS = 1000;
@@ -40,6 +41,7 @@ function isValidPersistedEntry(entry: unknown): entry is DownloadCodeCacheEntry 
         Number.isFinite(candidate.expiresAt)
     );
 }
+
 const store = new Map<string, ConversationBucket>();
 
 function getBucket(conversationId: string): ConversationBucket | undefined {
@@ -157,6 +159,7 @@ function persistBucket(
         } satisfies PersistedConversationBucket,
     });
 }
+
 export function cacheInboundDownloadCode(
     accountId: string,
     conversationId: string,

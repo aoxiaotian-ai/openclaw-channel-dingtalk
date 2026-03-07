@@ -84,11 +84,8 @@ function readPendingCardState(storePath?: string, log?: Logger): PendingCardStat
 
   const filePath = getCardStateFilePath(storePath);
   const legacyPath = getLegacyCardStateFilePath(storePath);
-  if (!filePath || !legacyPath) {
-    return { version: CARD_STATE_FILE_VERSION, updatedAt: Date.now(), pendingCards: [] };
-  }
 
-  if (fs.existsSync(filePath)) {
+  if (filePath && fs.existsSync(filePath)) {
     const parsed = readNamespaceJson<Partial<PendingCardStateFile>>(CARD_PENDING_NAMESPACE, {
       storePath,
       format: "json",
@@ -99,7 +96,7 @@ function readPendingCardState(storePath?: string, log?: Logger): PendingCardStat
   }
 
   try {
-    if (!fs.existsSync(legacyPath)) {
+    if (!legacyPath || !fs.existsSync(legacyPath)) {
       return { version: CARD_STATE_FILE_VERSION, updatedAt: Date.now(), pendingCards: [] };
     }
     const raw = fs.readFileSync(legacyPath, "utf-8");

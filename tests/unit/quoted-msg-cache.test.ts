@@ -8,6 +8,7 @@ import {
     clearQuotedMsgCacheForTest,
 } from '../../src/quoted-msg-cache';
 import { resolveNamespacePath } from '../../src/persistence-store';
+
 describe('quoted-msg-cache', () => {
     let tempDir = '';
     let storePath = '';

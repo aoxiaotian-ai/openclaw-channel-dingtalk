@@ -62,7 +62,7 @@ function writeNamespaceJsonAtomic<T>(
 
 1. 根目录：`path.dirname(storePath) + "/dingtalk-state"`
 2. 文件名：`<namespace><scope-suffix>.<format>`（默认 `json`）
-3. `namespace` 与 `scope` 中非法字符会被替换为 `_`
+3. `namespace` 中的非字母数字字符会被替换为 `_`；`scope` 的各字段值会以 base64url 编码后参与拼接，而不会按字符替换为 `_`
 4. `scope` 拼接顺序固定：
    - `accountId`
    - `agentId`
@@ -80,7 +80,7 @@ const p = resolveNamespacePath("cards.active.pending", {
 
 // 结果类似：
 // /tmp/openclaw/session/main/dingtalk-state/
-// cards.active.pending.account-main.conversation-cid_xxx.json
+// cards.active.pending.account-bWFpbg.conversation-Y2lkX3h4eA.json
 ```
 
 ## 4. 读写最佳实践
