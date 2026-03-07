@@ -11,6 +11,7 @@ import { getLogger } from "./logger-context";
 import { getVoiceDurationMs, uploadMedia as uploadMediaUtil } from "./media-utils";
 import { detectMarkdownAndExtractTitle } from "./message-utils";
 import { resolveOriginalPeerId } from "./peer-id-registry";
+import { appendOutboundToQuoteJournal, appendProactiveOutboundJournal } from "./quote-journal";
 import {
   deleteProactiveRiskObservation,
   getProactiveRiskObservation,
@@ -29,6 +30,15 @@ import type {
 import { AICardStatus } from "./types";
 
 export { detectMediaTypeFromExtension } from "./media-utils";
+
+function extractOutboundMessageId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const data = payload as Record<string, unknown>;
+  const value = data.processQueryKey ?? data.messageId ?? data.msgid;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
 
 function composeCardContentForAppend(previous: string | undefined, incoming: string): string {
   const prev = previous ?? "";
@@ -278,7 +288,18 @@ export async function sendProactiveMedia(
       deleteProactiveRiskObservation(options.accountId, resolvedTarget);
     }
 
-    const messageId = result.data?.processQueryKey || result.data?.messageId;
+    const messageId = extractOutboundMessageId(result.data);
+    if (options.storePath && options.accountId) {
+      await appendProactiveOutboundJournal({
+        storePath: options.storePath,
+        accountId: options.accountId,
+        conversationId: resolvedTarget,
+        messageId,
+        text: `[media:${mediaType}] ${mediaPath}`,
+        messageType: "outbound-proactive-media",
+        log,
+      });
+    }
     return { ok: true, data: result.data, messageId };
   } catch (err: any) {
     log?.error?.(`[DingTalk] Failed to send proactive media: ${err.message}`);
@@ -381,8 +402,8 @@ export async function sendMessage(
   config: DingTalkConfig,
   conversationId: string,
   text: string,
-  options: SendMessageOptions & { sessionWebhook?: string; card?: AICardInstance } = {},
-): Promise<{ ok: boolean; error?: string; data?: AxiosResponse }> {
+  options: SendMessageOptions & { sessionWebhook?: string; card?: AICardInstance; accountId?: string } = {},
+): Promise<{ ok: boolean; error?: string; data?: AxiosResponse; messageId?: string }> {
   try {
     const messageType = config.messageType || "markdown";
     const log = options.log || getLogger();
@@ -422,12 +443,36 @@ export async function sendMessage(
     }
 
     if (options.sessionWebhook) {
-      await sendBySession(config, options.sessionWebhook, text, options);
-      return { ok: true };
+      const data = await sendBySession(config, options.sessionWebhook, text, options);
+      const messageId = extractOutboundMessageId(data);
+      if (options.storePath && options.accountId) {
+        await appendOutboundToQuoteJournal({
+          storePath: options.storePath,
+          accountId: options.accountId,
+          conversationId,
+          messageId,
+          text,
+          messageType: "outbound",
+          log,
+        });
+      }
+      return { ok: true, data, messageId };
     }
 
     const result = await sendProactiveTextOrMarkdown(config, conversationId, text, options);
-    return { ok: true, data: result };
+    const messageId = extractOutboundMessageId(result);
+    if (options.storePath && options.accountId) {
+      await appendProactiveOutboundJournal({
+        storePath: options.storePath,
+        accountId: options.accountId,
+        conversationId,
+        messageId,
+        text,
+        messageType: "outbound-proactive",
+        log,
+      });
+    }
+    return { ok: true, data: result, messageId };
   } catch (err: any) {
     options.log?.error?.(`[DingTalk] Send message failed: ${err.message}`);
     if (err?.response?.data !== undefined) {
