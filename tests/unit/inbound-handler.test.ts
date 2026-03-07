@@ -380,6 +380,44 @@ describe('inbound-handler', () => {
         expect(envelopeArg.body).toContain('[引用消息: "历史原文"]');
     });
 
+    it('writes normalized inbound journal text without quoted prefix noise', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.session.resolveStorePath = vi
+            .fn()
+            .mockReturnValueOnce('/tmp/dm-agent-store.json')
+            .mockReturnValueOnce('/tmp/dm-account-store.json');
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用消息: "历史原文"]\n\n真正正文',
+            messageType: 'text',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown' } as any,
+            data: {
+                msgId: 'm_prefixed_1',
+                msgtype: 'text',
+                text: { content: '真正正文', isReplyMsg: true },
+                conversationType: '1',
+                conversationId: 'cid_ok',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: 1700000000000,
+            },
+        } as any);
+
+        expect(shared.appendQuoteJournalEntryMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                text: '真正正文',
+            }),
+        );
+    });
+
     it('uses DingTalk DM conversationId for journal writes instead of senderId', async () => {
         const runtime = buildRuntime();
         runtime.channel.session.resolveStorePath = vi

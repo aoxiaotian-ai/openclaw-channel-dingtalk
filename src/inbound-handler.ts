@@ -90,6 +90,13 @@ function isUnhandledStopReasonText(value: string): boolean {
   return /^Unhandled stop reason:\s*[A-Za-z0-9_-]+/i.test(normalized);
 }
 
+function stripQuotedPrefixForJournal(value: string): string {
+  return value
+    .replace(/^\[引用消息: .*?\]\n\n/s, "")
+    .replace(/^\[这是一条引用消息，原消息ID: .*?\]\n\n/s, "")
+    .trim();
+}
+
 /**
  * Download DingTalk media file via runtime media service (sandbox-compatible).
  * Files are stored in the global media inbound directory.
@@ -387,7 +394,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       conversationId: groupId,
       msgId: data.msgId,
       messageType: content.messageType,
-      text: content.text,
+      text: stripQuotedPrefixForJournal(content.text),
       createdAt: data.createAt,
     });
   } catch (err) {
