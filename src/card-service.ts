@@ -745,7 +745,7 @@ export function findCardContent(
 ): string | null {
   const scopedKey = `${accountId}:${conversationId}`;
   let bucket = cardContentStore.get(scopedKey);
-  if (!bucket && storePath && cardContentStore.size < CARD_CACHE_MAX_CONVERSATIONS) {
+  if (!bucket && storePath) {
     const loaded = loadCardContentBucketFromPersistence(accountId, conversationId, storePath);
     if (loaded) {
       cardContentStore.set(scopedKey, loaded);

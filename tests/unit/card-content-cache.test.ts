@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     cacheCardContent,
@@ -18,6 +18,15 @@ describe('card-content-cache', () => {
         clearCardContentCacheForTest();
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dingtalk-card-content-cache-'));
         storePath = path.join(tempDir, 'session-store.json');
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        if (tempDir) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+        tempDir = '';
+        storePath = '';
     });
 
     it('基本读写（±2秒时间匹配）', () => {
@@ -61,6 +70,18 @@ describe('card-content-cache', () => {
 
         expect(findCardContent('default', 'conv_500', 1000500)).toBe('content_500');
         expect(findCardContent('default', 'conv_0', 1000000)).toBeNull();
+    });
+
+    it('容量已满时仍可从持久化恢复新会话内容', () => {
+        cacheCardContent('default', 'conv_persisted', '持久化内容', 1000000, storePath);
+
+        clearCardContentCacheForTest();
+
+        for (let i = 0; i < 500; i++) {
+            cacheCardContent('default', `conv_${i}`, `content_${i}`, 2000000 + i);
+        }
+
+        expect(findCardContent('default', 'conv_persisted', 1000500, storePath)).toBe('持久化内容');
     });
 
     it('单聊和群聊独立缓存', () => {
