@@ -46,6 +46,7 @@ function shouldSendProactivePermissionHint(params: {
   isDirect: boolean;
   accountId: string;
   senderId: string;
+  senderOriginalId?: string;
   senderStaffId?: string;
   config: DingTalkConfig;
   nowMs: number;
@@ -64,11 +65,14 @@ function shouldSendProactivePermissionHint(params: {
     return false;
   }
 
-  const riskObservation = getProactiveRiskObservationForAny(
-    params.accountId,
-    [params.senderId, params.senderStaffId],
-    params.nowMs,
-  );
+  const riskTargets = [params.senderId, params.senderOriginalId, params.senderStaffId]
+    .map((id) => (id || "").trim())
+    .filter((id, index, arr) => Boolean(id) && arr.indexOf(id) === index);
+  if (riskTargets.length === 0) {
+    return false;
+  }
+
+  const riskObservation = getProactiveRiskObservationForAny(params.accountId, riskTargets, params.nowMs);
   if (!riskObservation || riskObservation.source !== "proactive-api") {
     return false;
   }
@@ -215,7 +219,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   }
 
   const isDirect = data.conversationType === "1";
-  const senderId = data.senderStaffId || data.senderId;
+  const senderOriginalId = (data.senderId || "").trim();
+  const senderStaffId = (data.senderStaffId || "").trim();
+  const senderId = senderOriginalId || senderStaffId;
   const senderName = data.senderNick || "Unknown";
   const groupId = data.conversationId;
   const groupName = data.conversationTitle || "Group";
@@ -230,7 +236,8 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       isDirect,
       accountId,
       senderId,
-      senderStaffId: data.senderStaffId,
+      senderOriginalId,
+      senderStaffId,
       config: dingtalkConfig,
       nowMs: Date.now(),
     })

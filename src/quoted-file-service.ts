@@ -189,14 +189,12 @@ export async function findFileByTimestamp(
     const data = resp.data as Record<string, any>;
     const dentries = (data.dentries || []) as Array<Record<string, any>>;
 
-    let lastFileTime: number | undefined;
     for (const entry of dentries) {
       if (entry.type !== "FILE" || !entry.createTime) {
         continue;
       }
       try {
         const fileTime = parseDingTalkFileTime(entry.createTime as string);
-        lastFileTime = fileTime;
         const delta = Math.abs(fileTime - createdAt);
         if (delta <= MATCH_WINDOW_MS && delta < bestDelta) {
           bestDelta = delta;
@@ -205,13 +203,6 @@ export async function findFileByTimestamp(
       } catch {
         log?.debug?.(`[DingTalk][QuotedFile] Failed to parse createTime: ${entry.createTime}`);
       }
-    }
-
-    if (lastFileTime !== undefined && lastFileTime < createdAt - MATCH_WINDOW_MS) {
-      log?.debug?.(
-        `[DingTalk][QuotedFile] Stop at page ${page + 1}: last file ${lastFileTime} already past match window (target=${createdAt} window=${MATCH_WINDOW_MS}ms)`,
-      );
-      break;
     }
 
     nextToken = data.nextToken as string | undefined;
