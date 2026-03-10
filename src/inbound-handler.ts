@@ -4,6 +4,7 @@ import { getAccessToken } from "./auth";
 import {
   createAICard,
   finishAICard,
+  findCardContent,
   formatContentForCard,
   isCardInTerminalState,
 } from "./card-service";
@@ -16,16 +17,19 @@ import {
   clearProactiveRiskObservationsForTest,
   getProactiveRiskObservationForAny,
 } from "./proactive-risk-registry";
+import {
+  appendQuoteJournalEntry,
+  DEFAULT_JOURNAL_TTL_DAYS,
+  resolveQuotedMessageById,
+} from "./quote-journal";
+import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
+import { cacheInboundDownloadCode, getCachedDownloadCode } from "./quoted-msg-cache";
 import { getDingTalkRuntime } from "./runtime";
 import { sendBySession, sendMessage } from "./send-service";
+import { acquireSessionLock } from "./session-lock";
 import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
 import { AICardStatus } from "./types";
-import { acquireSessionLock } from "./session-lock";
-import { findCardContent } from "./card-service";
-import { cacheInboundDownloadCode, getCachedDownloadCode } from "./quoted-msg-cache";
-import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
 import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
-import { appendQuoteJournalEntry, DEFAULT_JOURNAL_TTL_DAYS, resolveQuotedMessageById } from "./quote-journal";
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
 const DEFAULT_THINKING_MESSAGE = "🤔 思考中，请稍候...";
@@ -239,7 +243,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     } catch (err: any) {
       log?.debug?.(`[DingTalk] Failed to send proactive permission hint: ${err.message}`);
       if (err?.response?.data !== undefined) {
-        log?.debug?.(formatDingTalkErrorPayloadLog("inbound.proactivePermissionHint", err.response.data));
+        log?.debug?.(
+          formatDingTalkErrorPayloadLog("inbound.proactivePermissionHint", err.response.data),
+        );
       }
     }
   }
@@ -271,7 +277,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         } catch (err: any) {
           log?.debug?.(`[DingTalk] Failed to send access denied message: ${err.message}`);
           if (err?.response?.data !== undefined) {
-            log?.debug?.(formatDingTalkErrorPayloadLog("inbound.accessDeniedReply", err.response.data));
+            log?.debug?.(
+              formatDingTalkErrorPayloadLog("inbound.accessDeniedReply", err.response.data),
+            );
           }
         }
 
@@ -450,7 +458,13 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       log?.debug?.("[DingTalk] downloadCode expired/failed, falling back to spaceId+fileId");
       try {
         const unionId = await getUnionIdByStaffId(dingtalkConfig, data.senderStaffId, log);
-        media = await downloadGroupFile(dingtalkConfig, cached.spaceId, cached.fileId, unionId, log);
+        media = await downloadGroupFile(
+          dingtalkConfig,
+          cached.spaceId,
+          cached.fileId,
+          unionId,
+          log,
+        );
       } catch (err: any) {
         log?.warn?.(`[DingTalk] spaceId+fileId fallback failed: ${err.message}`);
       }
@@ -466,7 +480,8 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       mediaType = media.mimeType;
     } else {
       content.text = content.text.replace(
-        content.quoted.prefix, "[引用了一张图片，但下载失败]\n\n",
+        content.quoted.prefix,
+        "[引用了一张图片，但下载失败]\n\n",
       );
     }
   }
@@ -485,11 +500,15 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
 
     // Step 2 (group only): Cache miss → fall back to group file API time-based matching.
     if (!fileResolved && !isDirect) {
-      const file = await resolveQuotedFile(dingtalkConfig, {
-        openConversationId: data.conversationId,
-        senderStaffId: data.senderStaffId,
-        fileCreatedAt: content.quoted.fileCreatedAt,
-      }, log);
+      const file = await resolveQuotedFile(
+        dingtalkConfig,
+        {
+          openConversationId: data.conversationId,
+          senderStaffId: data.senderStaffId,
+          fileCreatedAt: content.quoted.fileCreatedAt,
+        },
+        log,
+      );
       if (file) {
         mediaPath = file.path;
         mediaType = file.mimeType;
@@ -510,7 +529,10 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     const cardContent = findCardContent(accountId, to, content.quoted.cardCreatedAt, storePath);
     if (cardContent) {
       const preview = cardContent.length > 50 ? cardContent.slice(0, 50) + "..." : cardContent;
-      content.text = content.text.replace(content.quoted.prefix, `[引用机器人回复: "${preview}"]\n\n`);
+      content.text = content.text.replace(
+        content.quoted.prefix,
+        `[引用机器人回复: "${preview}"]\n\n`,
+      );
     }
     // Card cache miss: prefix already contains "[引用了机器人的回复]", keep as-is.
   }
@@ -593,7 +615,8 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   try {
     // 4) Optional "thinking..." feedback (markdown mode only).
     if (dingtalkConfig.showThinking !== false) {
-      const thinkingText = (dingtalkConfig.thinkingMessage || "").trim() || DEFAULT_THINKING_MESSAGE;
+      const thinkingText =
+        (dingtalkConfig.thinkingMessage || "").trim() || DEFAULT_THINKING_MESSAGE;
       if (useCardMode && currentAICard) {
         log?.debug?.(
           "[DingTalk] messageType=card: showThinking/thinkingMessage do not send standalone hints; thinking is streamed in card mode.",
@@ -616,7 +639,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         } catch (err: any) {
           log?.debug?.(`[DingTalk] Thinking message failed: ${err.message}`);
           if (err?.response?.data !== undefined) {
-            log?.debug?.(formatDingTalkErrorPayloadLog("inbound.thinkingMessage", err.response.data));
+            log?.debug?.(
+              formatDingTalkErrorPayloadLog("inbound.thinkingMessage", err.response.data),
+            );
           }
         }
       }
@@ -637,7 +662,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
               }
 
               if (typeof textToSend === "string" && isUnhandledStopReasonText(textToSend)) {
-                log?.warn?.(`[DingTalk] Suppressed stop reason from outbound chat content: ${textToSend}`);
+                log?.warn?.(
+                  `[DingTalk] Suppressed stop reason from outbound chat content: ${textToSend}`,
+                );
                 return;
               }
 
@@ -693,7 +720,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             } catch (err: any) {
               log?.error?.(`[DingTalk] Reply failed: ${err.message}`);
               if (err?.response?.data !== undefined) {
-                log?.error?.(formatDingTalkErrorPayloadLog("inbound.replyDeliver", err.response.data));
+                log?.error?.(
+                  formatDingTalkErrorPayloadLog("inbound.replyDeliver", err.response.data),
+                );
               }
               throw err;
             }
@@ -731,7 +760,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             } catch (err: any) {
               log?.debug?.(`[DingTalk] Thinking stream update failed: ${err.message}`);
               if (err?.response?.data !== undefined) {
-                log?.debug?.(formatDingTalkErrorPayloadLog("inbound.thinkingStream", err.response.data));
+                log?.debug?.(
+                  formatDingTalkErrorPayloadLog("inbound.thinkingStream", err.response.data),
+                );
               }
             }
           },
@@ -743,7 +774,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         try {
           await finishAICard(currentAICard, "❌ 处理失败", log);
         } catch (cardCloseErr: any) {
-          log?.debug?.(`[DingTalk] Failed to finalize card after dispatch error: ${cardCloseErr.message}`);
+          log?.debug?.(
+            `[DingTalk] Failed to finalize card after dispatch error: ${cardCloseErr.message}`,
+          );
           currentAICard.state = AICardStatus.FAILED;
           currentAICard.lastUpdated = Date.now();
         }
