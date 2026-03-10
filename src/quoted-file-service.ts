@@ -1,18 +1,48 @@
+import http from "node:http";
+import https from "node:https";
 import axios from "axios";
 import { getAccessToken } from "./auth";
 import { getDingTalkRuntime } from "./runtime";
 import type { DingTalkConfig, Logger, MediaFile } from "./types";
-import { formatDingTalkErrorPayloadLog } from "./utils";
+import { formatDingTalkErrorPayload, formatDingTalkErrorPayloadLog } from "./utils";
+
+const ipv4OnlyHttpAgent = new http.Agent({ family: 4 });
+const ipv4OnlyHttpsAgent = new https.Agent({ family: 4 });
 
 const DINGTALK_API = "https://api.dingtalk.com";
 const DINGTALK_OAPI = "https://oapi.dingtalk.com";
 
-const MATCH_WINDOW_MS = 5000;
+const MATCH_WINDOW_MS = 10_000;
 const MAX_PAGES = 3;
 const PAGE_SIZE = 50;
 
 const UNION_ID_CACHE_MAX = 5000;
 const SPACE_ID_CACHE_MAX = 500;
+
+function describeResolveError(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    const statusText = err.response?.statusText;
+    const statusLabel = status
+      ? `status=${status}${statusText ? ` ${statusText}` : ""}`
+      : "status=unknown";
+    const code = typeof err.code === "string" && err.code ? ` code=${err.code}` : "";
+    const hasRequest = err.request ? " request=yes" : " request=no";
+    const hasResponse = err.response ? " response=yes" : " response=no";
+    if (err.response?.data !== undefined) {
+      return `${statusLabel}${code}${hasRequest}${hasResponse} ${formatDingTalkErrorPayload(err.response.data)}`;
+    }
+    return `${statusLabel}${code}${hasRequest}${hasResponse} message=${err.message || "unknown axios error"}`;
+  }
+  if (err instanceof Error) {
+    return `${err.name || "Error"} message=${err.message || "unknown error"}`;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
 
 // ============ LRU caches ============
 
@@ -122,6 +152,13 @@ interface DentryMatch {
   name: string;
 }
 
+export interface ResolvedQuotedFile {
+  media: MediaFile;
+  spaceId: string;
+  fileId: string;
+  name?: string;
+}
+
 export async function findFileByTimestamp(
   config: DingTalkConfig,
   spaceId: string,
@@ -136,7 +173,9 @@ export async function findFileByTimestamp(
   let nextToken: string | undefined;
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    const body: Record<string, any> = { option: { maxResults: PAGE_SIZE } };
+    const body: Record<string, any> = {
+      option: { maxResults: PAGE_SIZE },
+    };
     if (nextToken) {
       body.option.nextToken = nextToken;
     }
@@ -150,12 +189,14 @@ export async function findFileByTimestamp(
     const data = resp.data as Record<string, any>;
     const dentries = (data.dentries || []) as Array<Record<string, any>>;
 
+    let lastFileTime: number | undefined;
     for (const entry of dentries) {
       if (entry.type !== "FILE" || !entry.createTime) {
         continue;
       }
       try {
         const fileTime = parseDingTalkFileTime(entry.createTime as string);
+        lastFileTime = fileTime;
         const delta = Math.abs(fileTime - createdAt);
         if (delta <= MATCH_WINDOW_MS && delta < bestDelta) {
           bestDelta = delta;
@@ -166,7 +207,10 @@ export async function findFileByTimestamp(
       }
     }
 
-    if (bestMatch && bestDelta < 1000) {
+    if (lastFileTime !== undefined && lastFileTime < createdAt - MATCH_WINDOW_MS) {
+      log?.debug?.(
+        `[DingTalk][QuotedFile] Stop at page ${page + 1}: last file ${lastFileTime} already past match window (target=${createdAt} window=${MATCH_WINDOW_MS}ms)`,
+      );
       break;
     }
 
@@ -188,45 +232,86 @@ export async function downloadGroupFile(
 ): Promise<MediaFile | null> {
   const rt = getDingTalkRuntime();
   const token = await getAccessToken(config, log);
+  let resourceUrl = "";
+  let contentType = "application/octet-stream";
 
-  const infoResp = await axios.post(
-    `${DINGTALK_API}/v1.0/storage/spaces/${spaceId}/dentries/${dentryId}/downloadInfos/query?unionId=${unionId}`,
-    {},
-    { headers: { "x-acs-dingtalk-access-token": token } },
-  );
+  try {
+    const infoResp = await axios.post(
+      `${DINGTALK_API}/v1.0/storage/spaces/${spaceId}/dentries/${dentryId}/downloadInfos/query?unionId=${unionId}`,
+      {},
+      { headers: { "x-acs-dingtalk-access-token": token } },
+    );
 
-  const info = infoResp.data as Record<string, any>;
-  const headerSig = info?.headerSignatureInfo;
-  const resourceUrl = headerSig?.resourceUrls?.[0] as string | undefined;
-  if (!resourceUrl) {
-    log?.warn?.("[DingTalk][QuotedFile] downloadInfos/query returned no resourceUrl");
-    return null;
-  }
+    const info = infoResp.data as Record<string, any>;
+    const headerSig = info?.headerSignatureInfo;
+    resourceUrl = (headerSig?.resourceUrls?.[0] as string | undefined) || "";
+    if (!resourceUrl) {
+      log?.warn?.("[DingTalk][QuotedFile] downloadInfos/query returned no resourceUrl");
+      return null;
+    }
 
-  const sigHeaders: Record<string, string> = {};
-  if (headerSig?.headers) {
-    for (const [k, v] of Object.entries(headerSig.headers)) {
-      if (typeof v === "string") {
-        sigHeaders[k] = v;
+    const sigHeaders: Record<string, string> = {};
+    if (headerSig?.headers) {
+      for (const [k, v] of Object.entries(headerSig.headers)) {
+        if (typeof v === "string") {
+          sigHeaders[k] = v;
+        }
       }
     }
+    let fileResp;
+    try {
+      fileResp = await axios.get(resourceUrl, {
+        headers: sigHeaders,
+        responseType: "arraybuffer",
+        timeout: 15000,
+      });
+    } catch (firstErr: unknown) {
+      log?.warn?.(
+        `[DingTalk][QuotedFile] CDN download failed on default network path, retrying with IPv4-only: ${describeResolveError(firstErr)}`,
+      );
+      try {
+        fileResp = await axios.get(resourceUrl, {
+          headers: sigHeaders,
+          responseType: "arraybuffer",
+          httpAgent: ipv4OnlyHttpAgent,
+          httpsAgent: ipv4OnlyHttpsAgent,
+          timeout: 15000,
+        });
+      } catch (retryErr: unknown) {
+        const host = resourceUrl ? new URL(resourceUrl).host : "(unknown-host)";
+        throw new Error(
+          `download-resource failed host=${host} detail=${describeResolveError(retryErr)}`,
+          { cause: retryErr },
+        );
+      }
+    }
+
+    contentType = (fileResp.headers["content-type"] as string) || "application/octet-stream";
+    const buffer = Buffer.from(fileResp.data as ArrayBuffer);
+
+    const maxBytes =
+      config.mediaMaxMb && config.mediaMaxMb > 0 ? config.mediaMaxMb * 1024 * 1024 : undefined;
+    try {
+      const saved = maxBytes
+        ? await rt.channel.media.saveMediaBuffer(buffer, contentType, "inbound", maxBytes)
+        : await rt.channel.media.saveMediaBuffer(buffer, contentType, "inbound");
+
+      return { path: saved.path, mimeType: saved.contentType ?? contentType };
+    } catch (err: unknown) {
+      throw new Error(
+        `save-buffer failed contentType=${contentType} detail=${describeResolveError(err)}`,
+        { cause: err },
+      );
+    }
+  } catch (err: unknown) {
+    if (axios.isAxiosError(err) && err.response?.data !== undefined) {
+      log?.warn?.(formatDingTalkErrorPayloadLog("quotedFile.downloadGroupFile", err.response.data));
+    }
+    log?.warn?.(
+      `[DingTalk][QuotedFile] downloadGroupFile failed: spaceId=${spaceId} dentryId=${dentryId} resourceUrl=${resourceUrl || "(none)"} contentType=${contentType} error=${describeResolveError(err)}`,
+    );
+    return null;
   }
-
-  const fileResp = await axios.get(resourceUrl, {
-    headers: sigHeaders,
-    responseType: "arraybuffer",
-  });
-
-  const contentType = (fileResp.headers["content-type"] as string) || "application/octet-stream";
-  const buffer = Buffer.from(fileResp.data as ArrayBuffer);
-
-  const maxBytes =
-    config.mediaMaxMb && config.mediaMaxMb > 0 ? config.mediaMaxMb * 1024 * 1024 : undefined;
-  const saved = maxBytes
-    ? await rt.channel.media.saveMediaBuffer(buffer, contentType, "inbound", maxBytes)
-    : await rt.channel.media.saveMediaBuffer(buffer, contentType, "inbound");
-
-  return { path: saved.path, mimeType: saved.contentType ?? contentType };
 }
 
 // ============ Composite entry point ============
@@ -241,8 +326,9 @@ export async function resolveQuotedFile(
   config: DingTalkConfig,
   params: ResolveQuotedFileParams,
   log?: Logger,
-): Promise<MediaFile | null> {
+): Promise<ResolvedQuotedFile | null> {
   const { openConversationId, senderStaffId, fileCreatedAt } = params;
+  let stage = "init";
 
   if (!senderStaffId || !fileCreatedAt) {
     log?.warn?.("[DingTalk][QuotedFile] Missing senderStaffId or fileCreatedAt, skipping");
@@ -250,8 +336,11 @@ export async function resolveQuotedFile(
   }
 
   try {
+    stage = "resolve-unionId";
     const unionId = await getUnionIdByStaffId(config, senderStaffId, log);
+    stage = "resolve-spaceId";
     const spaceId = await getGroupFileSpaceId(config, openConversationId, unionId, log);
+    stage = "list-and-match";
     const match = await findFileByTimestamp(config, spaceId, unionId, fileCreatedAt, log);
 
     if (!match) {
@@ -261,17 +350,26 @@ export async function resolveQuotedFile(
       return null;
     }
 
-    log?.debug?.(
-      `[DingTalk][QuotedFile] Matched file: dentryId=${match.dentryId} name=${match.name}`,
-    );
+    stage = "download-file";
+    const media = await downloadGroupFile(config, spaceId, match.dentryId, unionId, log);
+    if (!media) {
+      return null;
+    }
 
-    return await downloadGroupFile(config, spaceId, match.dentryId, unionId, log);
+    return {
+      media,
+      spaceId,
+      fileId: match.dentryId,
+      name: match.name,
+    };
   } catch (err: any) {
     if (log?.warn) {
       if (axios.isAxiosError(err) && err.response?.data !== undefined) {
         log.warn(formatDingTalkErrorPayloadLog("quotedFile.resolve", err.response.data));
       }
-      log.warn(`[DingTalk][QuotedFile] Failed to resolve quoted file: ${err.message}`);
+      log.warn(
+        `[DingTalk][QuotedFile] Failed to resolve quoted file: stage=${stage} conversationId=${openConversationId} senderStaffId=${senderStaffId} fileCreatedAt=${fileCreatedAt} error=${describeResolveError(err)}`,
+      );
     }
     return null;
   }

@@ -5,8 +5,11 @@ import axios from "axios";
 import { getAccessToken } from "./auth";
 import { stripTargetPrefix } from "./config";
 import { resolveOriginalPeerId } from "./peer-id-registry";
-import { readNamespaceJson, resolveNamespacePath, writeNamespaceJsonAtomic } from "./persistence-store";
-import { formatDingTalkErrorPayloadLog } from "./utils";
+import {
+  readNamespaceJson,
+  resolveNamespacePath,
+  writeNamespaceJsonAtomic,
+} from "./persistence-store";
 import type {
   AICardInstance,
   AICardStreamingRequest,
@@ -15,13 +18,131 @@ import type {
   Logger,
 } from "./types";
 import { AICardStatus } from "./types";
+import { formatDingTalkErrorPayloadLog } from "./utils";
 
 const DINGTALK_API = "https://api.dingtalk.com";
 // Thinking/tool stream snippets are truncated to keep card updates compact.
 const THINKING_TRUNCATE_LENGTH = 500;
 const CARD_STATE_FILE_VERSION = 1;
 const CARD_PENDING_NAMESPACE = "cards.active.pending";
+const CARD_PROCESS_QUERY_NAMESPACE = "cards.content.quote-process-query";
 const RECOVERY_FINALIZE_MESSAGE = "⚠️ 上一次回复处理中断，已自动结束。请重新发送你的问题。";
+const AICARD_DEGRADE_DEFAULT_MS = 30 * 60 * 1000;
+
+const aicardDegradeByAccount = new Map<string, { untilMs: number; reason: string }>();
+
+function getAICardDegradeMs(config?: DingTalkConfig): number {
+  const raw = config?.aicardDegradeMs;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 60_000) {
+    return raw;
+  }
+  return AICARD_DEGRADE_DEFAULT_MS;
+}
+
+function normalizeDegradeErrorMessage(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function shouldTriggerAICardDegrade(err: unknown): boolean {
+  const maybeErr = err as {
+    response?: { status?: number; data?: { message?: string } };
+    message?: string;
+  };
+  const status = maybeErr.response?.status;
+  const msg = normalizeDegradeErrorMessage(
+    String(maybeErr.response?.data?.message || maybeErr.message || ""),
+  );
+  if (status === 403 || status === 429) {
+    return true;
+  }
+  if (typeof status === "number" && status >= 500 && status < 600) {
+    return true;
+  }
+  return [
+    "ipnotinwhitelist",
+    "forbiddenaccessdenied",
+    "timeout",
+    "etimedout",
+    "econnreset",
+    "eaiagain",
+    "sockethangup",
+    "badgateway",
+  ].some((keyword) => msg.includes(keyword));
+}
+
+export function isAICardDegraded(accountId: string): boolean {
+  const state = aicardDegradeByAccount.get(accountId);
+  if (!state) {
+    return false;
+  }
+  if (Date.now() >= state.untilMs) {
+    aicardDegradeByAccount.delete(accountId);
+    return false;
+  }
+  return true;
+}
+
+export function getAICardDegradeState(
+  accountId: string,
+): { remainingMs: number; reason: string } | null {
+  const state = aicardDegradeByAccount.get(accountId);
+  if (!state) {
+    return null;
+  }
+  const remainingMs = state.untilMs - Date.now();
+  if (remainingMs <= 0) {
+    aicardDegradeByAccount.delete(accountId);
+    return null;
+  }
+  return { remainingMs, reason: state.reason };
+}
+
+export function activateAICardDegrade(
+  accountId: string,
+  reason: string,
+  config?: DingTalkConfig,
+  log?: Logger,
+): void {
+  const durationMs = getAICardDegradeMs(config);
+  const untilMs = Date.now() + durationMs;
+  const existed = isAICardDegraded(accountId);
+  aicardDegradeByAccount.set(accountId, { untilMs, reason });
+  const minutes = Math.round(durationMs / 60000);
+  if (existed) {
+    log?.warn?.(
+      `[DingTalk][AICard][Degrade] Extended for account=${accountId}, minutes=${minutes}, reason=${reason}`,
+    );
+  } else {
+    log?.warn?.(
+      `[DingTalk][AICard][Degrade] Activated for account=${accountId}, minutes=${minutes}, reason=${reason}`,
+    );
+  }
+}
+
+export function clearAICardDegrade(accountId: string, log?: Logger): void {
+  if (!aicardDegradeByAccount.has(accountId)) {
+    return;
+  }
+  const reason = aicardDegradeByAccount.get(accountId)?.reason || "";
+  aicardDegradeByAccount.delete(accountId);
+  log?.info?.(`[DingTalk][AICard][Degrade] Cleared for account=${accountId}, lastReason=${reason}`);
+}
+
+function extractCardProcessQueryKey(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const data = payload as Record<string, any>;
+  const deliverResults = data.result?.deliverResults;
+  if (Array.isArray(deliverResults)) {
+    for (const item of deliverResults) {
+      if (typeof item?.carrierId === "string" && item.carrierId.trim()) {
+        return item.carrierId.trim();
+      }
+    }
+  }
+  return undefined;
+}
 
 interface CreateAICardOptions {
   accountId?: string;
@@ -67,15 +188,14 @@ function normalizePendingState(parsed: Partial<PendingCardStateFile>): PendingCa
   return {
     version: typeof parsed.version === "number" ? parsed.version : CARD_STATE_FILE_VERSION,
     updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now(),
-    pendingCards: records.filter(
-      (entry): entry is PendingCardRecord =>
-        Boolean(
-          entry &&
-            typeof entry.accountId === "string" &&
-            typeof entry.cardInstanceId === "string" &&
-            (entry.outTrackId === undefined || typeof entry.outTrackId === "string") &&
-            typeof entry.conversationId === "string",
-        ),
+    pendingCards: records.filter((entry): entry is PendingCardRecord =>
+      Boolean(
+        entry &&
+        typeof entry.accountId === "string" &&
+        typeof entry.cardInstanceId === "string" &&
+        (entry.outTrackId === undefined || typeof entry.outTrackId === "string") &&
+        typeof entry.conversationId === "string",
+      ),
     ),
   };
 }
@@ -116,7 +236,11 @@ function readPendingCardState(storePath?: string, log?: Logger): PendingCardStat
   }
 }
 
-function writePendingCardState(state: PendingCardStateFile, storePath?: string, log?: Logger): void {
+function writePendingCardState(
+  state: PendingCardStateFile,
+  storePath?: string,
+  log?: Logger,
+): void {
   if (!storePath) {
     return;
   }
@@ -337,10 +461,10 @@ async function finalizePendingCardsByAccount(
     token = await getAccessToken(config, log);
   } catch (err: any) {
     const tokenFailureScope =
-      mode === "recover"
-        ? "pending card recovery"
-        : "finalizing active cards";
-    log?.warn?.(`[DingTalk][AICard] Failed to fetch token for ${tokenFailureScope}: ${err.message}`);
+      mode === "recover" ? "pending card recovery" : "finalizing active cards";
+    log?.warn?.(
+      `[DingTalk][AICard] Failed to fetch token for ${tokenFailureScope}: ${err.message}`,
+    );
     return 0;
   }
 
@@ -363,7 +487,9 @@ async function finalizePendingCardsByAccount(
       finalizedCount += 1;
     } catch (err: any) {
       const action = mode === "recover" ? "recover" : "finalize";
-      log?.warn?.(`[DingTalk][AICard] Failed to ${action} active card ${entry.cardInstanceId}: ${err.message}`);
+      log?.warn?.(
+        `[DingTalk][AICard] Failed to ${action} active card ${entry.cardInstanceId}: ${err.message}`,
+      );
       removePendingCardById(entry.cardInstanceId, storePath, log);
     }
   }
@@ -376,8 +502,18 @@ export async function createAICard(
   log?: Logger,
   options: CreateAICardOptions = {},
 ): Promise<AICardInstance | null> {
+  const accountId = options.accountId ?? "default";
+  if (isAICardDegraded(accountId)) {
+    const state = getAICardDegradeState(accountId);
+    log?.warn?.(
+      `[DingTalk][AICard][Degrade] Skip create for account=${accountId}, remainingMs=${state?.remainingMs || 0}, reason=${state?.reason || "unknown"}`,
+    );
+    return null;
+  }
+
   try {
-    const shouldPersistPending = options.persistPending ?? Boolean(options.accountId && options.storePath);
+    const shouldPersistPending =
+      options.persistPending ?? Boolean(options.accountId && options.storePath);
     const token = await getAccessToken(config, log);
     // Use randomUUID to avoid collisions across workers/restarts.
     const cardInstanceId = `card_${randomUUID()}`;
@@ -392,11 +528,15 @@ export async function createAICard(
 
     // DingTalk createAndDeliver API payload.
     const cardTemplateKey = config.cardTemplateKey || "content";
+    const cardParamMap = {
+      config: JSON.stringify({ autoLayout: true, enableForward: true }),
+      [cardTemplateKey]: "",
+    };
     const createAndDeliverBody = {
       cardTemplateId: config.cardTemplateId,
       outTrackId: cardInstanceId,
       cardData: {
-        cardParamMap: { [cardTemplateKey]: "" },
+        cardParamMap,
       },
       callbackType: "STREAM",
       imGroupOpenSpaceModel: { supportForward: true },
@@ -443,7 +583,8 @@ export async function createAICard(
       | undefined;
     const responseTracking = responseData?.result;
     const processQueryKey =
-      typeof responseTracking?.processQueryKey === "string" && responseTracking.processQueryKey.trim()
+      typeof responseTracking?.processQueryKey === "string" &&
+      responseTracking.processQueryKey.trim()
         ? responseTracking.processQueryKey.trim()
         : typeof responseData?.processQueryKey === "string" && responseData.processQueryKey.trim()
           ? responseData.processQueryKey.trim()
@@ -466,19 +607,20 @@ export async function createAICard(
       cardInstanceId: resolvedCardInstanceId,
       accessToken: token,
       conversationId,
-      accountId: options.accountId,
+      accountId,
       storePath: options.storePath,
       createdAt: Date.now(),
       lastUpdated: Date.now(),
       state: AICardStatus.PROCESSING,
       config,
-      processQueryKey,
+      processQueryKey: processQueryKey || extractCardProcessQueryKey(resp.data),
       outTrackId,
     };
     if (shouldPersistPending) {
       upsertPendingCard(aiCardInstance, options.storePath, log);
     }
 
+    clearAICardDegrade(accountId, log);
     return aiCardInstance;
   } catch (err: any) {
     log?.error?.(`[DingTalk][AICard] Create failed: ${err.message}`);
@@ -489,6 +631,14 @@ export async function createAICard(
       log?.error?.(`[DingTalk][AICard] Create error response${statusLabel}`);
       log?.error?.(
         formatDingTalkErrorPayloadLog("card.create", err.response.data, "[DingTalk][AICard]"),
+      );
+    }
+    if (shouldTriggerAICardDegrade(err)) {
+      activateAICardDegrade(
+        accountId,
+        `card.create:${err?.response?.status || "unknown"}`,
+        config,
+        log,
       );
     }
     return null;
@@ -622,9 +772,15 @@ export async function streamAICard(
     card.state = AICardStatus.FAILED;
     card.lastUpdated = Date.now();
     removePendingCard(card, log);
-    log?.error?.(
-      `[DingTalk][AICard] Streaming update failed: ${err.message}`,
-    );
+    if (card.accountId && shouldTriggerAICardDegrade(err)) {
+      activateAICardDegrade(
+        card.accountId,
+        `card.stream:${err?.response?.status || "unknown"}`,
+        card.config,
+        log,
+      );
+    }
+    log?.error?.(`[DingTalk][AICard] Streaming update failed: ${err.message}`);
     if (err.response?.data !== undefined) {
       log?.error?.(
         formatDingTalkErrorPayloadLog("card.stream", err.response.data, "[DingTalk][AICard]"),
@@ -641,9 +797,118 @@ export async function finishAICard(
 ): Promise<void> {
   log?.debug?.(`[DingTalk][AICard] Starting finish, final content length=${content.length}`);
   await streamAICard(card, content, true, log);
-  if (card.conversationId && content.trim()) {
-    cacheCardContent(card.accountId || "", card.conversationId, content, card.createdAt, card.storePath);
+  if (card.conversationId && content.trim() && card.accountId && card.processQueryKey) {
+    cacheCardContentByProcessQueryKey(
+      card.accountId,
+      card.conversationId,
+      card.processQueryKey,
+      content,
+      card.storePath,
+    );
   }
+}
+
+interface ProcessQueryCardContentEntry {
+  content: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+interface PersistedProcessQueryCardContent {
+  updatedAt: number;
+  entries: Record<string, ProcessQueryCardContentEntry>;
+}
+
+function readProcessQueryCardContent(
+  accountId: string,
+  conversationId: string,
+  storePath?: string,
+): PersistedProcessQueryCardContent {
+  if (!storePath) {
+    return { updatedAt: 0, entries: {} };
+  }
+  return readNamespaceJson<PersistedProcessQueryCardContent>(CARD_PROCESS_QUERY_NAMESPACE, {
+    storePath,
+    scope: { accountId, conversationId },
+    format: "json",
+    fallback: { updatedAt: 0, entries: {} },
+  });
+}
+
+function writeProcessQueryCardContent(
+  accountId: string,
+  conversationId: string,
+  data: PersistedProcessQueryCardContent,
+  storePath?: string,
+): void {
+  if (!storePath) {
+    return;
+  }
+  writeNamespaceJsonAtomic(CARD_PROCESS_QUERY_NAMESPACE, {
+    storePath,
+    scope: { accountId, conversationId },
+    format: "json",
+    data,
+  });
+}
+
+function purgeExpiredProcessQueryEntries(
+  persisted: PersistedProcessQueryCardContent,
+  nowMs: number,
+): boolean {
+  let changed = false;
+  for (const [key, entry] of Object.entries(persisted.entries)) {
+    if (!entry || typeof entry.expiresAt !== "number" || nowMs >= entry.expiresAt) {
+      delete persisted.entries[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+export function cacheCardContentByProcessQueryKey(
+  accountId: string,
+  conversationId: string,
+  processQueryKey: string,
+  content: string,
+  storePath?: string,
+): void {
+  if (!processQueryKey.trim() || !content.trim() || !storePath) {
+    return;
+  }
+  const nowMs = Date.now();
+  const persisted = readProcessQueryCardContent(accountId, conversationId, storePath);
+  purgeExpiredProcessQueryEntries(persisted, nowMs);
+  persisted.entries[processQueryKey] = {
+    content,
+    createdAt: nowMs,
+    expiresAt: nowMs + CARD_CACHE_TTL_MS,
+  };
+  persisted.updatedAt = nowMs;
+  writeProcessQueryCardContent(accountId, conversationId, persisted, storePath);
+}
+
+export function getCardContentByProcessQueryKey(
+  accountId: string,
+  conversationId: string,
+  processQueryKey: string,
+  storePath?: string,
+): string | null {
+  if (!processQueryKey.trim() || !storePath) {
+    return null;
+  }
+  const nowMs = Date.now();
+  const persisted = readProcessQueryCardContent(accountId, conversationId, storePath);
+  const changed = purgeExpiredProcessQueryEntries(persisted, nowMs);
+  const entry = persisted.entries[processQueryKey];
+  if (!entry) {
+    if (changed) {
+      persisted.updatedAt = nowMs;
+      writeProcessQueryCardContent(accountId, conversationId, persisted, storePath);
+    }
+    return null;
+  }
+  return entry.content;
 }
 
 // ============ Card content cache (for quoted card lookup) ============
