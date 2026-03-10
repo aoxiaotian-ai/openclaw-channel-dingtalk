@@ -4,7 +4,7 @@ import { readNamespaceJson, writeNamespaceJsonAtomic } from "./persistence-store
 
 const QUOTE_JOURNAL_NAMESPACE = "quoted.msg-journal";
 const QUOTE_JOURNAL_VERSION = 1;
-const DEFAULT_JOURNAL_TTL_DAYS = 7;
+export const DEFAULT_JOURNAL_TTL_DAYS = 7;
 const MAX_RECORDS_PER_SCOPE = 1000;
 
 type JournalEntry = {
