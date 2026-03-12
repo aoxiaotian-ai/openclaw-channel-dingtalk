@@ -170,6 +170,14 @@ function buildGroupTurnContextPrompt(params: {
   ].join("\n");
 }
 
+type ReplyStreamPayload = {
+  text?: string;
+};
+
+type ReplyChunkInfo = {
+  kind?: string;
+};
+
 /**
  * Download DingTalk media file via runtime media service (sandbox-compatible).
  * Files are stored in the global media inbound directory.
@@ -1279,9 +1287,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         cfg,
         dispatcherOptions: {
           responsePrefix: "",
-          deliver: async (payload: any, info?: { kind: string }) => {
+          deliver: async (payload: ReplyStreamPayload, info?: ReplyChunkInfo) => {
             try {
-              const textToSend = payload.markdown || payload.text;
+              const textToSend = payload.text;
               if (!textToSend) {
                 return;
               }
@@ -1348,7 +1356,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           },
         },
         replyOptions: {
-          onReasoningStream: async (payload: any) => {
+          onReasoningStream: async (payload: ReplyStreamPayload) => {
             if (!useCardMode || !currentAICard) {
               return;
             }
@@ -1371,7 +1379,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 accountId,
                 storePath,
                 conversationId: groupId,
-                cardUpdateMode: "append",
+                cardUpdateMode: "replace",
               });
               if (!sendResult.ok) {
                 throw new Error(sendResult.error || "Thinking stream send failed");

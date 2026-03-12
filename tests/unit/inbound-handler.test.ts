@@ -2218,6 +2218,93 @@ describe('inbound-handler', () => {
         expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
     });
 
+    it('uses payload.text for outbound reply delivery even when markdown is present', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+            .fn()
+            .mockImplementation(async ({ dispatcherOptions }) => {
+                await dispatcherOptions.deliver(
+                    { text: 'plain text reply', markdown: 'stale markdown reply' },
+                    { kind: 'final' }
+                );
+                return { queuedFinal: false };
+            });
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+            data: {
+                msgId: 'm_payload_text_only',
+                msgtype: 'text',
+                text: { content: 'hello' },
+                conversationType: '1',
+                conversationId: 'cid_ok',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.sendMessageMock).toHaveBeenCalledWith(
+            expect.anything(),
+            'user_1',
+            'plain text reply',
+            expect.objectContaining({ card: undefined }),
+        );
+        expect(shared.sendMessageMock).not.toHaveBeenCalledWith(
+            expect.anything(),
+            'user_1',
+            'stale markdown reply',
+            expect.anything(),
+        );
+    });
+
+    it('streams reasoning updates to card in replace mode', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+            .fn()
+            .mockImplementation(async ({ replyOptions }) => {
+                await replyOptions?.onReasoningStream?.({ text: 'thinking pass 1' });
+                return { queuedFinal: false };
+            });
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+        const card = { cardInstanceId: 'card_reasoning_replace', state: '1', lastUpdated: Date.now() } as any;
+        shared.createAICardMock.mockResolvedValueOnce(card);
+        shared.isCardInTerminalStateMock.mockReturnValue(false);
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', showThinking: false } as any,
+            data: {
+                msgId: 'm_reasoning_replace',
+                msgtype: 'text',
+                text: { content: 'hello' },
+                conversationType: '1',
+                conversationId: 'cid_ok',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.sendMessageMock).toHaveBeenCalledWith(
+            expect.anything(),
+            'user_1',
+            'thinking pass 1',
+            expect.objectContaining({ card, cardUpdateMode: 'replace' }),
+        );
+    });
+
     it('sends proactive permission hint when proactive API risk was observed', async () => {
         recordProactiveRiskObservation({
             accountId: 'main',
