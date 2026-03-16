@@ -1369,9 +1369,17 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 if (mediaUrls.length > 0) {
                   await deliverMediaAttachments(mediaUrls);
                 }
+                // When cardRealTimeStream=true, the card was continuously updated via
+                // onPartialReply/controller during streaming. The framework's deliver(final)
+                // text may be shorter than what was already streamed to the card (e.g. only
+                // the last block, or post-processed text). Using finalText directly would
+                // cause a visible content revert. Prefer the last content actually pushed to
+                // the card by the controller; fall back to finalText only when the controller
+                // has no content (e.g. cardRealTimeStream=false, no streaming occurred).
+                const effectiveFinalText = controller!.getLastContent() || finalText;
                 if (!isCardInTerminalState(currentAICard.state) && !controller!.isFailed()) {
                   try {
-                    await finishAICard(currentAICard, finalText, log);
+                    await finishAICard(currentAICard, effectiveFinalText, log);
                     cardFinalized = true;
                   } catch (finalizeErr: any) {
                     log?.debug?.(`[DingTalk] AI Card finalization failed in deliver: ${finalizeErr.message}`);
@@ -1382,14 +1390,14 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                       currentAICard.state = AICardStatus.FAILED;
                       currentAICard.lastUpdated = Date.now();
                     }
-                    finalTextForFallback = finalText;
+                    finalTextForFallback = effectiveFinalText;
                   }
                 } else if (currentAICard.state === AICardStatus.FINISHED) {
                   log?.info?.("[DingTalk] Card already FINISHED before deliver(final), skipping duplicate finalize");
                   cardFinalized = true;
                 } else {
                   log?.info?.("[DingTalk] Card failed before deliver(final), deferring markdown fallback to post-dispatch");
-                  finalTextForFallback = finalText;
+                  finalTextForFallback = effectiveFinalText;
                 }
                 return;
               }

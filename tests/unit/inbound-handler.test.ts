@@ -3118,6 +3118,47 @@ describe('inbound-handler', () => {
         expect(fallbackCalls[0][2]).toBe('complete final answer');
     });
 
+    it('cardRealTimeStream: finalize uses controller.getLastContent() to avoid content revert', async () => {
+        // Regression test for: card content reverts to short text after accumulating large content
+        // during streaming. When cardRealTimeStream=true, onPartialReply drives card updates via
+        // the controller. The deliver(final) text from the framework may be shorter than what was
+        // already pushed to the card. finishAICard must use controller.getLastContent() instead.
+        const runtime = buildRuntime();
+        const streamedContent = '# Report\n\n| Col1 | Col2 |\n|------|------|\n| A    | B    |\n\nLong streamed content with tables and paragraphs.';
+        const shortFinalText = 'Short';  // Framework delivers only a short final chunk
+
+        runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi.fn()
+            .mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+                // Simulate: controller accumulates rich content via onPartialReply
+                replyOptions?.onPartialReply?.({ text: streamedContent });
+                await new Promise((r) => setTimeout(r, 10));
+                // Framework delivers a short final text (the bug: this would overwrite streamed content)
+                await dispatcherOptions.deliver({ text: shortFinalText }, { kind: 'final' });
+                return { queuedFinal: shortFinalText };
+            });
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: true, showThinking: false } as any,
+            data: {
+                msgId: 'mid_revert_test', msgtype: 'text', text: { content: 'hello' },
+                conversationType: '1', conversationId: 'cid_ok', senderId: 'user_1',
+                chatbotUserId: 'bot_1', sessionWebhook: 'https://session.webhook', createAt: Date.now(),
+            },
+        } as any);
+
+        // finishAICard should be called with the streamed content (from controller.getLastContent()),
+        // NOT with the short finalText from deliver(final).
+        expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
+        const finalizeArg = shared.finishAICardMock.mock.calls[0][1];
+        expect(finalizeArg).toContain('Report');  // streamed content preserved
+        expect(finalizeArg).not.toBe(shortFinalText);  // short final text NOT used directly
+    });
+
     it('acquires session lock with the resolved sessionKey', async () => {
         await handleDingTalkMessage({
             cfg: {},
