@@ -92,6 +92,20 @@ const MAX_DYNAMIC_ACK_DISPOSE_WAIT_MS = 500;
 const ATTACHMENT_TEXT_PREFIX = "[附件内容摘录]";
 const proactiveHintLastSentAt = new Map<string, number>();
 
+function resolvePinnedMainDmOwner(params: {
+  dmScope?: string;
+  allowFrom?: string[];
+}): string | null {
+  if ((params.dmScope ?? "main") !== "main") {
+    return null;
+  }
+  const allow = normalizeAllowFrom(params.allowFrom);
+  if (allow.hasWildcard) {
+    return null;
+  }
+  return allow.entries.length === 1 ? allow.entries[0] : null;
+}
+
 function ttlDaysToMs(ttlDays: number | undefined): number | undefined {
   if (typeof ttlDays !== "number" || !Number.isFinite(ttlDays) || ttlDays <= 0) {
     return undefined;
@@ -1478,7 +1492,27 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     storePath,
     sessionKey: ctx.SessionKey || route.sessionKey,
     ctx,
-    updateLastRoute: { sessionKey: route.mainSessionKey, channel: "dingtalk", to, accountId },
+    updateLastRoute: (() => {
+      if (!isDirect) {
+        return undefined;
+      }
+      const pinnedMainDmOwner = resolvePinnedMainDmOwner({
+        dmScope: cfg.session?.dmScope,
+        allowFrom: dingtalkConfig.allowFrom,
+      });
+      const senderRecipient = (senderOriginalId || senderId || "").trim().toLowerCase();
+      if (
+        pinnedMainDmOwner
+        && senderRecipient
+        && pinnedMainDmOwner.trim().toLowerCase() !== senderRecipient
+      ) {
+        log?.debug?.(
+          `[DingTalk] Skipping main-session last route update for ${senderRecipient} (pinned owner ${pinnedMainDmOwner})`,
+        );
+        return undefined;
+      }
+      return { sessionKey: route.mainSessionKey, channel: "dingtalk", to, accountId };
+    })(),
     onRecordError: (err: unknown) => {
       log?.error?.(`[DingTalk] Failed to record inbound session: ${String(err)}`);
     },
