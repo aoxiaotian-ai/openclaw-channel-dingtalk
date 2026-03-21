@@ -772,9 +772,12 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
 
           try {
             const payload = JSON.parse(res.data);
+            ctx.log?.info?.(
+              `[${account.accountId}] [DingTalk][CardCallback] ===== RAW PAYLOAD =====\n${JSON.stringify(payload, null, 2)}`,
+            );
             const analysis = analyzeCardCallback(payload);
             ctx.log?.info?.(
-              `[${account.accountId}] [DingTalk][CardCallback] action=${analysis.summary} raw=${JSON.stringify(payload)}`,
+              `[${account.accountId}] [DingTalk][CardCallback] ===== ANALYSIS =====\n${JSON.stringify(analysis, null, 2)}`,
             );
 
             if (analysis.feedbackTarget && analysis.feedbackAckText) {

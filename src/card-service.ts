@@ -577,9 +577,48 @@ export async function createAICard(
 
     // DingTalk createAndDeliver API payload.
     const cardTemplateKey = config.cardTemplateKey || "content";
+    const testBtns = [
+      {
+        text: "允许",
+        color: "green",
+        status: "normal",
+        event: {
+          type: "sendCardRequest",
+          params: {
+            actionId: "btn_approve",
+            params: { action: "allow" },
+          },
+        },
+      },
+      {
+        text: "允许一次",
+        color: "blue",
+        status: "normal",
+        event: {
+          type: "sendCardRequest",
+          params: {
+            actionId: "btn_approve_once",
+            params: { action: "allow-once" },
+          },
+        },
+      },
+      {
+        text: "拒绝",
+        color: "red",
+        status: "normal",
+        event: {
+          type: "sendCardRequest",
+          params: {
+            actionId: "btn_deny",
+            params: { action: "deny" },
+          },
+        },
+      },
+    ];
     const cardParamMap = {
       config: JSON.stringify({ autoLayout: true, enableForward: true }),
       [cardTemplateKey]: "",
+      btns: JSON.stringify(testBtns),
     };
     const createAndDeliverBody = {
       cardTemplateId: config.cardTemplateId,
