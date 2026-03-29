@@ -29,4 +29,13 @@ describe("docs task list rendering", () => {
         expect(html).not.toContain("<li>[ ] ");
         expect(html).not.toContain("<li>[x] ");
     });
+
+    it("does not render nested anchor tags for literal media placeholder text inside issue titles", async () => {
+        const md = await createMarkdownRenderer(docsRoot, vitepressConfig.markdown, vitepressConfig.base);
+        const todoSource = readFileSync(resolve(repoRoot, "TODO.md"), "utf8");
+        const html = md.render(todoSource);
+
+        expect(html).not.toContain('href="media:image"');
+        expect(html).not.toContain("</a></a>");
+    });
 });
