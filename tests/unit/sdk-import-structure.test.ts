@@ -53,6 +53,6 @@ describe("plugin-sdk import structure", () => {
         expect(packageJson.devDependencies?.openclaw).toBeUndefined();
         expect(packageJson.peerDependencies?.openclaw).toBeDefined();
         expect(packageJson.peerDependencies?.openclaw).toBe(">=2026.3.24");
-        expect(packageJson.openclaw?.install?.minHostVersion).toBe("2026.3.24");
+        expect(packageJson.openclaw?.install?.minHostVersion).toBe(">=2026.3.24");
     });
 });

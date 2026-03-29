@@ -88,7 +88,7 @@
       ]
     },
     "install": {
-      "minHostVersion": "2026.3.24",
+      "minHostVersion": ">=2026.3.24",
       "npmSpec": "@soimy/dingtalk",
       "localPath": ".",
       "defaultChoice": "npm"
