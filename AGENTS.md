@@ -298,3 +298,4 @@ pnpm test:coverage
 - Network calls are mocked in tests (`vi.mock`), no real DingTalk API requests are made
 - CI should run `pnpm test` on every push and pull request
 - Coverage can be generated with `pnpm test:coverage`
+- When the task involves DingTalk real-device validation, PR-scoped test checklists, `验证 TODO` drafting, or contributor-workflow updates for that process, read and follow `skills/dingtalk-real-device-testing/SKILL.md` first.
